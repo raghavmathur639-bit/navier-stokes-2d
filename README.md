@@ -1,71 +1,87 @@
 # navier-stokes-2d
-# 2D Navier–Stokes solver
 
-A finite-volume solver for the 2D incompressible Navier–Stokes equations, written from scratch in Python (NumPy and SciPy). It simulates flow past NACA aerofoils and a circular cylinder, and computes lift, drag and vortex shedding.
+A Python program that simulates air flowing past a wing shape (an aerofoil) or a cylinder. It works out the lift, the drag and the swirls (vortices) that form behind the shape, by solving the Navier–Stokes equations step by step on a grid.
 
 ![Vortex street behind a cylinder at Re = 100](docs/vortex_street_cylinder_Re100.gif)
 
-*Vorticity behind a cylinder at Re = 100: the von Kármán vortex street.*
+*Swirls peeling off behind a cylinder, first from one side, then the other. This pattern is called a von Kármán vortex street.*
 
- The equations
+## The equations
 
-Non-dimensional incompressible Navier–Stokes, with chord length, free-stream speed and density all equal to 1:
+The Navier–Stokes equations are Newton's second law, $F = ma$, written for a tiny blob of fluid:
 
-$$\frac{\partial \mathbf{u}}{\partial t} + (\mathbf{u}\cdot\nabla)\mathbf{u} = -\nabla p + \frac{1}{Re}\nabla^2\mathbf{u} + \mathbf{f}$$
+$$\underbrace{\frac{\partial \mathbf{u}}{\partial t} + (\mathbf{u}\cdot\nabla)\mathbf{u}}_{\text{acceleration}} = \underbrace{-\nabla p}_{\text{pressure push}} + \underbrace{\frac{1}{Re}\nabla^2\mathbf{u}}_{\text{friction}}$$
 
-$$\nabla\cdot\mathbf{u} = 0$$
+$$\nabla\cdot\mathbf{u} = 0 \quad\text{(air doesn't pile up anywhere)}$$
 
-$\mathbf{u} = (u, v)$ is velocity, $p$ is pressure, $Re = Uc/\nu$ is the Reynolds number and $\mathbf{f}$ is the forcing that holds the fluid still inside the body. Time is measured in chords travelled by the free stream.
+What each symbol means, using multivariable calculus:
 
- Method
+- $\mathbf{u} = (u, v)$ is the velocity at each point: $u$ is the speed to the right, $v$ is the speed upwards. It is a vector field, so every point $(x, y)$ has its own arrow.
+- $p$ is the pressure, a scalar field.
+- $\partial \mathbf{u}/\partial t$ is how fast the velocity changes at one fixed point.
+- $(\mathbf{u}\cdot\nabla)\mathbf{u} = u\,\dfrac{\partial \mathbf{u}}{\partial x} + v\,\dfrac{\partial \mathbf{u}}{\partial y}$ is the extra acceleration a blob gets by moving into a region where the air is faster or slower.
+- $-\nabla p = -\left(\dfrac{\partial p}{\partial x}, \dfrac{\partial p}{\partial y}\right)$: the gradient points uphill in pressure, so the minus sign means air is pushed from high pressure to low.
+- $\nabla^2\mathbf{u} = \dfrac{\partial^2 \mathbf{u}}{\partial x^2} + \dfrac{\partial^2 \mathbf{u}}{\partial y^2}$ (the Laplacian) compares a point with the average of its neighbours. Friction (viscosity) evens out those differences.
+- $\nabla\cdot\mathbf{u} = \dfrac{\partial u}{\partial x} + \dfrac{\partial v}{\partial y}$ (the divergence) is the net flow out of a tiny box. Setting it to 0 means whatever flows in must flow out.
+- $Re$, the **Reynolds number**, compares how hard the air pushes on with how sticky it is. Small $Re$ is like honey; large $Re$ is like air round a jet. Everything here uses $Re = 1{,}500$, which is roughly a 3 cm wing in a gentle breeze.
 
-**Staggered (MAC) grid.** Pressure sits at cell centres, $u$ on vertical faces and $v$ on horizontal faces. Each velocity sits exactly on the face it carries flow through, so the mass balance of every cell is exact and pressure can't decouple into a checkerboard.
+Units are scaled so the wing's length (the chord), the air speed and the air density are all 1. Time is measured in "how many chord lengths the air has travelled".
 
-![Staggered grid](docs/staggered_grid.png)
+## How the program solves them
 
-**Projection method.** Each step first moves the velocity forward using advection and viscosity only, giving $\mathbf{u}^*$. This velocity is not divergence-free, so a pressure correction is solved for and subtracted:
+Nobody can solve these equations with a formula for a real shape, so the computer does it numerically:
 
-$$\nabla^2\phi = \frac{\nabla\cdot\mathbf{u}^*}{\Delta t}, \qquad \mathbf{u}^{n+1} = \mathbf{u}^* - \Delta t\,\nabla\phi$$
+1. **Chop space into a grid of small squares.** Pressure is stored in the middle of each square and velocity on its edges (a "staggered grid"). That way the computer can check exactly how much air enters and leaves every square.
 
-**Boundaries.** Uniform inflow on the left, walls with no flow through them at the top and bottom, and an outflow on the right scaled so it carries exactly the mass that comes in.
+   ![Staggered grid](docs/staggered_grid.png)
 
-**Pressure Poisson solve.** All boundaries have Neumann conditions, so the Laplacian diagonalises under a 2D discrete cosine transform. The Poisson equation is solved exactly in $O(N \log N)$ with `scipy.fft.dctn`, with no iteration.
+2. **Turn derivatives into differences.** A derivative like $\partial u/\partial x$ becomes (value in the next square − value in the previous square) ÷ (distance between them). This is the limit definition of a derivative, without taking the limit.
 
-**Advection and diffusion.** Third-order upwind differences for $(\mathbf{u}\cdot\nabla)\mathbf{u}$, second-order central differences for $\nabla^2\mathbf{u}$.
+3. **Step forward in time.** Each time step:
+   - **Guess:** move the air forward using only its own motion and friction. Call this guess $\mathbf{u}^*$.
+   - **Stop the air inside the wing:** set the velocity to zero inside the shape.
+   - **Fix the guess with pressure:** the guess makes air pile up in some squares. Pressure is whatever is needed to undo that. The computer solves
+     $$\nabla^2\phi = \nabla\cdot\mathbf{u}^*$$
+     and then subtracts $\nabla\phi$ from the velocity. Now $\nabla\cdot\mathbf{u} = 0$ everywhere.
+   
+   It does this three times per step and averages them in a clever way (a method called RK3), which makes it more accurate.
 
-**Time stepping.** Three-stage strong-stability-preserving Runge–Kutta (SSP-RK3), with a projection at every stage. The time step is set each step by a CFL limit (default 0.5) and the viscous stability limit.
+4. **Keep the steps small.** Each step is short enough that the air never jumps more than half a square at a time. Otherwise the simulation blows up.
 
-**Immersed boundary.** The body is not meshed. Each cell gets a solid fraction $\chi$ between 0 (fluid) and 1 (solid), and the velocity is forced towards zero in proportion to $\chi$ (direct forcing).
+**The pressure trick.** Solving for pressure means solving about 49,000 equations at once. Instead of doing it by brute force, the program writes the answer as a sum of cosine waves (a cosine transform, like a Fourier series). For cosine waves the equation becomes a simple division, so the exact answer comes out in a fraction of a second.
 
-![Solid fraction mask on the grid](docs/mask.png)
+**The wing on the grid.** The wing isn't drawn with smooth curves. Each square is marked with how much of it is inside the wing, from 0 (all air) to 1 (all wing), so the outline looks like a staircase.
 
-**Forces.** The momentum the mask removes from the fluid each step equals the force the body exerts on the flow, so summing it gives lift and drag, weighted by the RK3 stage weights (1/6, 2/3, 1):
+![The wing drawn on the grid](docs/mask.png)
 
-$$C_L = \frac{F_y}{\tfrac12\rho U^2 c}, \qquad C_D = \frac{F_x}{\tfrac12\rho U^2 c}$$
+**Lift and drag.** Every step, the program stops the air inside the wing. The push needed to stop it is equal and opposite to the force the air puts on the wing (Newton's third law). Adding those pushes up gives lift (upwards) and drag (backwards). They are reported as coefficients:
 
-**Shedding frequency.** The Strouhal number $St = fc/U$ comes from the dominant frequency in the lift history.
+$$C_L = \frac{\text{lift}}{\tfrac12\rho U^2 c}, \qquad C_D = \frac{\text{drag}}{\tfrac12\rho U^2 c}$$
 
-**Passive dye.** Lines of dye are released upstream and carried by the flow (streaklines). The code calls these "smoke".
+so the numbers don't depend on the wing's size or the air speed.
 
-**Probe point P.** A point 0.5 chord ahead of and 0.3 chord above the pivot records the time-averaged flow angle there (upwash), which rises with lift.
+**Other outputs.**
+- **Shedding frequency:** how often a swirl leaves the wing, written as the Strouhal number $St = fc/U$.
+- **Dye ("smoke"):** imaginary dye released upstream and carried by the air, to show where it goes.
+- **Point P:** a spot just in front of and above the wing, where the program measures the average angle at which the air rises.
 
- Validation
+## Is it right?
 
-| Test | This code | Published |
+| Test | This code | Real answer |
 |---|---|---|
-| Cylinder, Re 100: Strouhal number | 0.176 | 0.164–0.165 |
-| Cylinder, Re 100: mean drag coefficient | 1.46 | 1.33–1.36 |
-| NACA 0012 at 0°: lift coefficient | 0.000 | 0 (symmetric section) |
+| Cylinder at Re 100: how often swirls leave | 0.176 | 0.164–0.165 |
+| Cylinder at Re 100: drag coefficient | 1.46 | 1.33–1.36 |
+| Symmetric wing at 0°: lift | 0.000 | exactly 0 |
 
-The cylinder results are 7–9% high. The side walls (5% blockage) and the coarse grid (24 cells per diameter) both push them up.
+The cylinder answers are 7–9% too high. The walls of the simulated box and the fairly large grid squares both push them up.
 
-**Grid convergence.** At Re 3,000, refining from 64 to 100 cells per chord changed lift by 4% and the probe angle by 0.1°. At Re 20,000 the lift has not converged (CL = 0.28, 0.66 and 0.83 at 64, 100 and 150 cells per chord), so results above a few thousand should not be trusted at these grid sizes.
+**Does it change if the grid gets finer?** At $Re = 3{,}000$, going from 64 to 100 squares per chord changed the lift by only 4%, which is good. At $Re = 20{,}000$ it keeps changing (lift 0.28, 0.66, 0.83 at 64, 100, 150 squares), so the program can't be trusted there. The thin layer of slow air on the wing's surface becomes thinner than a few squares.
 
- Results: NACA 2412 and NACA 0012 at Re 1,500
+## Results: two wings at Re 1,500
 
-Channel walls 2 chords apart, 64 cells per chord. The raw data is in [`examples/`](examples).
+The NACA 2412 is slightly curved (cambered); the NACA 0012 is symmetric. Box walls 2 chords apart, 64 squares per chord. The raw numbers are in [`examples/`](examples).
 
-| α | 2412 C_L | 2412 C_D | 0012 C_L | 0012 C_D |
+| Angle | 2412 lift $C_L$ | 2412 drag $C_D$ | 0012 lift $C_L$ | 0012 drag $C_D$ |
 |---|---|---|---|---|
 | 0° | 0.003 | 0.110 | 0.000 | 0.107 |
 | 4° | 0.228 | 0.126 | 0.183 | 0.119 |
@@ -76,21 +92,21 @@ Channel walls 2 chords apart, 64 cells per chord. The raw data is in [`examples/
 
 ![Lift curve](docs/lift_curve_NACA2412_Re1500.png)
 
-The lift slope is about half the thin-aerofoil value of 2π per radian. That is expected at Re 1,500: the boundary layers are thick, viscous drag is large and the flow separates early. The cambered 2412 gives more lift than the symmetric 0012 at every angle.
+Lift grows with angle, but only about half as fast as textbook theory predicts. That theory ignores friction; at this small, slow scale friction matters a lot, and the air stops hugging the wing early. The curved 2412 makes more lift than the symmetric 0012 at every angle above 0°.
 
 ![Vorticity, NACA 2412 at 16 degrees](docs/vorticity_NACA2412_16deg.png)
 
-*NACA 2412 at 16°: the flow separates and sheds vortices.*
+*The 2412 at 16°: the air peels off the top and sheds big swirls.*
 
 ![Pressure and streamlines, NACA 2412 at 8 degrees](docs/pressure_NACA2412_8deg.png)
 
-*Pressure coefficient and streamlines at 8°: low pressure over the upper surface.*
+*Pressure at 8°: dark means low pressure on top of the wing. That suction is most of the lift.*
 
 ![Dye lines, NACA 2412 at 8 degrees](docs/dye_NACA2412_8deg.png)
 
-*Dye lines at 8°, rolling up into the wake.*
+*Dye at 8°, rolling up into swirls behind the wing.*
 
- Running it
+## Running it
 
 Needs Python 3.
 
@@ -102,56 +118,56 @@ pip install -r requirements.txt
 
 | Command | What it does | Time* |
 |---|---|---|
-| `python3 ns_aerofoil.py --quick` | coarse grid, short run: checks everything works | 15 s |
-| `python3 ns_aerofoil.py --alpha 8 --res 64` | one aerofoil case | 1–2 min |
-| `python3 ns_aerofoil.py` | default settings (100 cells per chord) | about 9 min |
-| `python3 ns_aerofoil.py --sweep --res 64` | 0° to 20°: CSV, lift curve | about 8 min |
-| `python3 ns_aerofoil.py --validate` | cylinder at Re 100 against published values | about 13 min |
+| `python3 ns_aerofoil.py --quick` | quick low-detail test | 15 s |
+| `python3 ns_aerofoil.py --alpha 8 --res 64` | one wing at 8° | 1–2 min |
+| `python3 ns_aerofoil.py` | default settings, 100 squares per chord | about 9 min |
+| `python3 ns_aerofoil.py --sweep --res 64` | angles 0° to 20°, with a lift graph | about 8 min |
+| `python3 ns_aerofoil.py --validate` | the cylinder test | about 13 min |
 
-*On a cloud Linux machine. A laptop may take up to twice as long.
+*On a cloud computer. A laptop can take up to twice as long.
 
-Options can be combined:
+Settings you can change (they can be combined):
 
 | Option | Meaning | Default |
 |---|---|---|
-| `--shape` | `NACA2412`, `NACA0012`, any NACA 4-digit, or `cylinder` | `NACA2412` |
-| `--alpha` | angle of attack in degrees | 6 |
+| `--shape` | `NACA2412`, `NACA0012`, any 4-digit NACA wing, or `cylinder` | `NACA2412` |
+| `--alpha` | angle of the wing, in degrees | 6 |
 | `--re` | Reynolds number | 1500 |
-| `--mode` | `tunnel` (walls `--height` chords apart) or `free` (walls 6 chords apart) | `tunnel` |
-| `--height` | channel height in chords, tunnel mode | 2.0 |
-| `--res` | cells per chord | 100 |
-| `--tend` | simulated time in chords travelled | 16 |
-| `--colour` | colour plots instead of greyscale | off |
+| `--mode` | `tunnel` (walls close by) or `free` (walls 6 chords apart) | `tunnel` |
+| `--height` | distance between the walls in tunnel mode, in chords | 2.0 |
+| `--res` | squares per chord (more = sharper but slower) | 100 |
+| `--tend` | how long to simulate, in chord lengths travelled | 16 |
+| `--colour` | colour pictures instead of grey | off |
 
 Example: `python3 ns_aerofoil.py --shape cylinder --re 200 --mode free --res 32 --tend 60`
 
- Output
+## What it saves
 
-Each run saves to `results/<shape>_a<angle>_Re<Re>_<mode>_n<res>/`:
+Each run goes into its own folder, `results/<shape>_a<angle>_Re<Re>_<mode>_n<res>/`:
 
-| File | Contents |
+| File | What it shows |
 |---|---|
-| `vorticity.gif`, `vorticity_final.png` | vorticity field |
-| `smoke.gif`, `smoke_final.png` | passive dye lines |
-| `pressure_streamlines_final.png` | pressure coefficient with streamlines |
-| `mean_streamlines.png` | time-averaged streamlines |
-| `forces.png`, `history.csv` | lift and drag against time |
-| `summary.txt` | mean C_L and C_D, Strouhal number, probe angle |
+| `vorticity.gif`, `vorticity_final.png` | how fast the air is spinning at each point |
+| `smoke.gif`, `smoke_final.png` | the dye lines |
+| `pressure_streamlines_final.png` | pressure, with lines showing the air's path |
+| `mean_streamlines.png` | the average flow over time |
+| `forces.png`, `history.csv` | lift and drag over time |
+| `summary.txt` | the final numbers |
 
-To watch a GIF on a Mac, select it in Finder and press the space bar.
+To play a GIF on a Mac, click it in Finder and press the space bar.
 
- Limits
+## Limits
 
-- 2D only, so there are no wing-tip vortices and no 3D breakdown of the wake.
-- The body is a staircase on a square grid, so the surface is only as smooth as the grid.
-- No turbulence model: results are only reliable at low Reynolds numbers (up to a few thousand at these grid sizes).
-- First-order accurate at the immersed boundary, even though the scheme is higher order away from it.
+- It's 2D, like looking at a slice of an endless wing. Real wings have tips, and swirls form there too.
+- The wing outline is a staircase of squares, not a smooth curve.
+- It doesn't model turbulence (chaotic, messy flow), so it only works for slow, small, smooth flows.
+- Right at the wing's surface it is less accurate than everywhere else.
 
- Files
+## Files
 
 ```
-ns_aerofoil.py      the solver
-requirements.txt    numpy, scipy, matplotlib, pillow
-docs/               figures used in this README
-examples/           angle sweep data at Re 1,500
+ns_aerofoil.py      the program
+requirements.txt    the Python libraries it needs
+docs/               pictures used in this README
+examples/           the results for angles 0° to 20°
 ```
